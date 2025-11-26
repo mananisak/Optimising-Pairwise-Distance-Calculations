@@ -51,6 +51,114 @@ Various options are available:
 - if X_is_Y is true then X and Y are taken to be the same matrix, so only X is referenced and syrk is used
   instead of gemm and only the upper triangle is referenced and stored. Need m=n, otherwise garbage will come out
 */
+#if defined __AVX512F__
+    #warning Using AVX512F
+    #include <immintrin.h>
+    void sqrt_(double* x, da_int len) {
+        const da_int reg_cap = 8; // How many doubles can fit in the register
+        // Vectorised square root
+        #pragma omp parallel for shared(reg_cap, x, len)
+        for (da_int i = 0; i <= len-reg_cap; i+=reg_cap) {
+            // Load vector
+            __m512d vec_x = _mm512_loadu_pd(x+i);
+
+            // Generate mask to detect negative numbers
+            __mmask8 k = _mm512_cmp_pd_mask(vec_x, _mm512_setzero_pd(), _CMP_GT_OQ);
+
+            // Perform masked square root, setting negative numbers to 0
+            vec_x = _mm512_maskz_sqrt_pd(k, vec_x);
+
+            // Store vector
+            _mm512_storeu_pd(x+i, vec_x);
+        }
+        // Do serial square root on the remainder
+        da_int rem = len % reg_cap;
+        for (da_int j = len-rem; j < len; ++j)
+            x[j] = (x[j] > 0) ? std::sqrt(x[j]) : 0.0;
+    }
+    void sqrt_(float* x, da_int len) {
+        const da_int reg_cap = 16; // How many floats can fit in the register
+        #pragma omp parallel for shared(reg_cap, x, len)
+        for (da_int i = 0; i <= len-reg_cap; i+=reg_cap) {
+            // Load vector
+            __m512 vec_x = _mm512_loadu_ps(x+i);
+
+            // Generate mask to detect negative numbers
+            __mmask16 k = _mm512_cmp_ps_mask(vec_x, _mm512_setzero_ps(), _CMP_GT_OQ);
+
+            // Perform masked square root, setting negative numbers to 0
+            vec_x = _mm512_maskz_sqrt_ps(k, vec_x);
+
+            // Store vector
+            _mm512_storeu_ps(x+i, vec_x);
+        }
+        // Do serial square root on the remainder and set negatives to 0
+        da_int rem = len % reg_cap;
+        for (da_int j = len-rem; j < len; ++j)
+            x[j] = (x[j] > 0) ? std::sqrt(x[j]) : 0.0;
+    }
+#elif defined __AVX2__
+    #warning Using AVX2
+    #include <immintrin.h>
+    void sqrt_(double* x, da_int len) {
+        const da_int reg_cap = 4; // How many doubles can fit in the register
+        #pragma omp parallel for shared(reg_cap, x, len)
+        for (da_int i = 0; i <= len-reg_cap; i+=reg_cap) {
+            // Load array into register
+            __m256d vec_x = _mm256_loadu_pd(x+i);
+
+            // Generate mask to detect negative numbers
+            __m256d mask = _mm256_cmp_pd(vec_x, _mm256_setzero_pd(), _CMP_GT_OQ);
+
+            // Perform standard square root
+            __m256d vec_sqrtx = _mm256_sqrt_pd(vec_x);
+
+            // Blend a zero vector and the square root vector using the mask
+            vec_sqrtx = _mm256_blendv_pd(_mm256_setzero_pd(), vec_sqrtx, mask);
+
+            // Store vector
+            _mm256_storeu_pd(x+i, vec_sqrtx);
+        }
+        // Do serial square root on the remainder and set negatives to 0
+        da_int rem = len % reg_cap;
+        for (da_int j = len-rem; j < len; ++j)
+            x[j] = (x[j] > 0) ? std::sqrt(x[j]) : 0.0;
+    }
+    void sqrt_(float* x, da_int len) {
+        const da_int reg_cap = 8; // How many floats can fit in the register
+        #pragma omp parallel for shared(reg_cap, x, len)
+        for (da_int i = 0; i <= len-reg_cap; i+=reg_cap) {
+            // Load array into register
+            __m256 vec_x = _mm256_loadu_ps(x+i);
+
+            // Generate mask to detect negative numbers
+            __m256 mask = _mm256_cmp_ps(vec_x, _mm256_setzero_ps(), _CMP_GT_OQ);
+
+            // Perform standard square root
+            __m256 vec_sqrtx = _mm256_sqrt_ps(vec_x);
+
+            // Blend a zero vector and the square root vector using the mask
+            vec_sqrtx = _mm256_blendv_ps(_mm256_setzero_ps(), vec_sqrtx, mask);
+
+            // Store vector
+            _mm256_storeu_ps(x+i, vec_sqrtx);
+        }
+        // Do serial square root on the remainder and set negatives to 0
+        da_int rem = len % reg_cap;
+        for (da_int j = len-rem; j < len; ++j)
+            x[j] = (x[j] > 0) ? std::sqrt(x[j]) : 0.0;
+    }
+#else
+    #warning AVX unavailable
+    template <typename T>
+    void sqrt_(T* x, da_int len) {
+        #pragma omp parallel for shared(reg_cap, x, len)
+        for (da_int i = 0; i < len; i++) {
+            x[i] = (x[i] > 0) ? std::sqrt(x[i]) : 0.0;
+        }
+    }
+#endif
+
 template <typename T>
 void euclidean_distance(da_order order, da_int m, da_int n, da_int k, const T *X,
                         da_int ldx, const T *Y, da_int ldy, T *D, da_int ldd, T *X_norms,
@@ -184,49 +292,39 @@ void euclidean_distance(da_order order, da_int m, da_int n, da_int k, const T *X
         nonblas_t0 = std::chrono::high_resolution_clock::now();
 
         if (!square) {
-            if (order == column_major) {
-                for (da_int j = 0; j < n; j++) {
-                    for (da_int i = 0; i < m; i++) {
-                        D[i + j * ldd] = std::sqrt(D[i + j * ldd]);
-                    }
-                }
-            } else {
-                for (da_int i = 0; i < m; i++) {
-                    for (da_int j = 0; j < n; j++) {
-                        D[i * ldd + j] = std::sqrt(D[i * ldd + j]);
-                    }
-                }
-            }
+            sqrt_(D, m*n);
         }
     } else {
         // Special case when computing upper triangle of symmetric distance matrix
 
         if (compute_X_norms == 0) {
             if (order == column_major) {
+                #pragma omp parallel for shared(D, ldd, m)
                 for (da_int j = 0; j < m; j++) {
                     for (da_int i = 0; i <= j; i++) {
                         D[i + j * ldd] = 0.0;
                     }
                 }
             } else {
-                for (da_int j = 0; j < m; j++) {
-                    for (da_int i = 0; i <= j; i++) {
+                #pragma omp parallel for shared(D, ldd, m)
+                for (da_int i = 0; i < m; i++) {
+                    for (da_int j = i; j < m; j++) {
                         D[i * ldd + j] = 0.0;
                     }
                 }
             }
         } else {
             if (order == column_major) {
-                #pragma omp parallel for shared(D, X_norms, ldd, k, m)
+                #pragma omp parallel for shared(D, X_norms, ldd, m)
                 for (da_int j = 0; j < m; j++) {
                     for (da_int i = 0; i <= j; i++) {
                         D[i + j * ldd] = X_norms[i] + X_norms[j];
                     }
                 }
             } else {
-                #pragma omp parallel for shared(D, X_norms, ldd, k, m)
-                for (da_int j = 0; j < m; j++) {
-                    for (da_int i = 0; i <= j; i++) {
+                #pragma omp parallel for shared(D, X_norms, ldd, m)
+                for (da_int i = 0; i < m; i++) {
+                    for (da_int j = i; j < m; j++) {
                         D[i * ldd + j] = X_norms[i] + X_norms[j];
                     }
                 }
@@ -244,27 +342,20 @@ void euclidean_distance(da_order order, da_int m, da_int n, da_int k, const T *X
 
         nonblas_t0 = std::chrono::high_resolution_clock::now();
 
-        if (compute_X_norms) {
-            // Ensure diagonal entries are precisely zero
-
-            if (order == column_major) {
-                for (da_int j = 0; j < m; j++) {
-                    if (!square) {
-                        for (da_int i = 0; i < j; i++) {
-                            D[i + j * ldd] = std::sqrt(D[i + j * ldd]);
-                        }
-                    }
-                    D[j + j * ldd] = 0.0;
-                }
-            } else {
-                for (da_int j = 0; j < m; j++) {
-                    if (!square) {
-                        for (da_int i = 0; i < j; i++) {
-                            D[i * ldd + j] = std::sqrt(D[i * ldd + j]);
-                        }
-                    }
-                    D[j + j * ldd] = 0.0;
-                }
+        // Ensure diagonal entries are precisely zero and perform square root if needed
+        if (order == column_major) {
+            #pragma omp parallel for shared(m, D, ldd)
+            for (int i = 0; i < m; i++) {
+                D[i + i * ldd] = 0.0;
+                if (!square)
+                    sqrt_(D + (i*ldd), i+1);
+            }
+        } else {
+            #pragma omp parallel for shared(m, D, ldd)
+            for (int i = 0; i < m; i++) {
+                D[i + i * ldd] = 0.0;
+                if (!square)
+                    sqrt_(D + (i*ldd) + i, m-i);
             }
         }
     }
@@ -321,15 +412,15 @@ da_status euclidean(da_order order, da_int m, da_int n, da_int k, const T *X, da
     // Update the lower part accordingly before returning.
     if (X_is_Y) {
         if (order == column_major) {
+            #pragma omp parallel for shared(D, m, ldd)
             for (da_int i = 0; i < m; i++)
-                for (da_int j = 0; j < m; j++)
-                    if (i > j)
-                        D[i + j * ldd] = D[j + i * ldd];
+                for (da_int j = 0; j < i; j++)
+                    D[i + j * ldd] = D[j + i * ldd];
         } else {
+            #pragma omp parallel for shared(D, m, ldd)
             for (da_int i = 0; i < m; i++)
-                for (da_int j = 0; j < m; j++)
-                    if (i > j)
-                        D[j + i * ldd] = D[i + j * ldd];
+                for (da_int j = 0; j < i; j++)
+                    D[j + i * ldd] = D[i + j * ldd];
         }
     }
 
