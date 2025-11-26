@@ -1,0 +1,41 @@
+import os
+import platform
+import shutil
+
+import numpy as np
+from setuptools import Extension, setup
+
+src_files = ['src/ral_nlls_pyiface.c']
+src_sources = [f'${CMAKE_CURRENT_SOURCE_DIR}/{s}' for s in src_files]
+src_targets = [f'${CMAKE_CURRENT_BINARY_DIR}/{s}' for s in src_files]
+for s, t in zip(src_sources, src_targets):
+    shutil.copyfile(s, t)
+
+setup_dir = os.path.dirname(__file__)
+def relpath(path):
+    return os.path.relpath(path, start=setup_dir)
+
+extra_opts = {}
+if platform.system() != 'Windows':
+    extra_opts['runtime_library_dirs'] = [
+        relpath('${CMAKE_CURRENT_BINARY_DIR}/src/')
+    ]
+
+setup(
+    ext_modules=[
+        Extension(
+            'ral_nlls',
+            sources = [relpath(t) for t in src_targets],
+            libraries = ['ral_nlls','${LIBS}'],
+            library_dirs = [relpath('${CMAKE_CURRENT_BINARY_DIR}/src/')],
+            extra_compile_args = ['-std=c99'],
+            include_dirs = [relpath('${CMAKE_CURRENT_SOURCE_DIR}/include/'),
+                            np.get_include()],
+            **extra_opts
+        ),
+    ]
+)
+
+for t in src_targets:
+    os.remove(t)
+

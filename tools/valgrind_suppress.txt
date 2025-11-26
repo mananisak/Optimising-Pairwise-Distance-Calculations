@@ -1,0 +1,50 @@
+{
+   ignore_blis
+   Memcheck:Cond
+   ...
+   obj:*bli*
+}
+
+{
+   ignore_blis
+   Memcheck:Leak
+   ...
+   obj:*bli*
+}
+
+{
+   ignore_blis
+   Memcheck:Leak
+   ...
+   fun:*bli*
+}
+
+{
+   ignore_gomp
+   Memcheck:Leak
+   ...
+   obj:*gomp*
+}
+
+{
+   ignore_libflame
+   Memcheck:Leak
+   ...
+   fun:*_fla
+}
+
+{
+   ignore_reachable_stuff
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   ...
+   fun:_dl_*
+}
+
+{
+   dynamic_dispatch_context
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   ...
+   fun:*context*
+}

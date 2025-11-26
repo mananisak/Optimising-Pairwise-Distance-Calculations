@@ -1,0 +1,197 @@
+# Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
+#
+# Redistribution and use in source and binary forms, with or without modification,
+# are permitted provided that the following conditions are met:
+# 1. Redistributions of source code must retain the above copyright notice,
+#    this list of conditions and the following disclaimer.
+# 2. Redistributions in binary form must reproduce the above copyright notice,
+#    this list of conditions and the following disclaimer in the documentation
+#    and/or other materials provided with the distribution.
+# 3. Neither the name of the copyright holder nor the names of its contributors
+#    may be used to endorse or promote products derived from this software without
+#    specific prior written permission.
+#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+# ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+# WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+# IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT,
+# INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
+# BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA,
+# OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+# WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+# ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+# POSSIBILITY OF SUCH DAMAGE.
+#
+"""
+Contains the functions to replace symbols from Scikit-learn by the AOCL-DA patch
+"""
+# pylint: disable = possibly-used-before-assignment
+
+import os
+import warnings
+import contextlib
+import sklearn.covariance as cov_sklearn
+import sklearn.decomposition as decomp_sklearn
+import sklearn.linear_model as linmod_sklearn
+import sklearn.cluster as clustering_sklearn
+import sklearn.tree as decision_tree_sklearn
+import sklearn.ensemble as decision_forest_sklearn
+import sklearn.metrics.pairwise as pairwise_sklearn
+import sklearn.model_selection as model_selection_sklearn
+import sklearn.neighbors as nearest_neighbors_sklearn
+import sklearn.svm as svm_sklearn
+from ._empirical_covariance import EmpiricalCovariance as cov_da
+from ._pca import PCA as PCA_da
+from ._kmeans import kmeans as kmeans_da
+from ._dbscan import DBSCAN as DBSCAN_da
+from ._linear_model import LinearRegression as LinearRegression_da
+from ._linear_model import Ridge as Ridge_da
+from ._linear_model import Lasso as Lasso_da
+from ._linear_model import ElasticNet as ElasticNet_da
+from ._linear_model import LogisticRegression as LogisticRegression_da
+from ._decision_tree import DecisionTreeClassifier as DecisionTreeClassifier_da
+from ._decision_forest import RandomForestClassifier as RandomForestClassifier_da
+from ._metrics import pairwise_distances as pairwise_distances_da
+from ._utils import train_test_split as train_test_split_da
+from ._nearest_neighbors import KNeighborsClassifier as KNeighborsClassifier_da
+from ._nearest_neighbors import KNeighborsRegressor as KNeighborsRegressor_da
+from ._nearest_neighbors import NearestNeighbors as NearestNeighbors_da
+from ._svm import SVC as SVC_da, SVR as SVR_da, NuSVC as NuSVC_da, NuSVR as NuSVR_da
+
+# Now on a case-by-case basis, overwrite with AMD symbols where we have
+# performant implementations
+
+# Global map of the sklearn symbols which have AMD implementations
+# key: class name
+# value: dict containing the sklearn symbols and their replacements
+#        pack - sklearn subpackage
+#        sk_sym - name of the sklearn symbol to replace
+#        da_sym - equivalent name in the DA sklearn lib
+AMD_SYMBOLS = {'EmpiricalCovariance': {'pack': cov_sklearn,
+                                       'sk_sym': getattr(cov_sklearn, "EmpiricalCovariance"),
+                                       'da_sym': cov_da},
+               'PCA': {'pack': decomp_sklearn,
+                       'sk_sym': getattr(decomp_sklearn, "PCA"),
+                       'da_sym': PCA_da},
+               'LinearRegression': {'pack': linmod_sklearn,
+                                    'sk_sym': getattr(linmod_sklearn, 'LinearRegression'),
+                                    'da_sym': LinearRegression_da},
+               'Ridge': {'pack': linmod_sklearn,
+                         'sk_sym': getattr(linmod_sklearn, 'Ridge'),
+                         'da_sym': Ridge_da},
+               'Lasso': {'pack': linmod_sklearn,
+                         'sk_sym': getattr(linmod_sklearn, 'Lasso'),
+                         'da_sym': Lasso_da},
+               'ElasticNet': {'pack': linmod_sklearn,
+                              'sk_sym': getattr(linmod_sklearn, 'ElasticNet'),
+                              'da_sym': ElasticNet_da},
+               'LogisticRegression': {'pack': linmod_sklearn,
+                                      'sk_sym': getattr(linmod_sklearn, 'LogisticRegression'),
+                                      'da_sym': LogisticRegression_da},
+               'KMeans': {'pack': clustering_sklearn,
+                          'sk_sym': getattr(clustering_sklearn, "KMeans"),
+                          'da_sym': kmeans_da},
+               'DBSCAN': {'pack': clustering_sklearn,
+                          'sk_sym': getattr(clustering_sklearn, "DBSCAN"),
+                          'da_sym': DBSCAN_da},
+               'DecisionTreeClassifier': {'pack': decision_tree_sklearn,
+                                          'sk_sym': getattr(decision_tree_sklearn, 'DecisionTreeClassifier'),
+                                          'da_sym': DecisionTreeClassifier_da},
+               'RandomForestClassifier': {'pack': decision_forest_sklearn,
+                                          'sk_sym': getattr(decision_forest_sklearn, 'RandomForestClassifier'),
+                                          'da_sym': RandomForestClassifier_da},
+               'pairwise_distances': {'pack': pairwise_sklearn,
+                                      'sk_sym': getattr(pairwise_sklearn, "pairwise_distances"),
+                                      'da_sym': pairwise_distances_da},
+               'train_test_split': {'pack': model_selection_sklearn,
+                                    'sk_sym': getattr(model_selection_sklearn, "train_test_split"),
+                                    'da_sym': train_test_split_da},
+               'KNeighborsClassifier': {'pack': nearest_neighbors_sklearn,
+                                        'sk_sym': getattr(nearest_neighbors_sklearn, 'KNeighborsClassifier'),
+                                        'da_sym': KNeighborsClassifier_da},
+               'KNeighborsRegressor': {'pack': nearest_neighbors_sklearn,
+                                       'sk_sym': getattr(nearest_neighbors_sklearn, 'KNeighborsRegressor'),
+                                       'da_sym': KNeighborsRegressor_da},
+               'NearestNeighbors': {'pack': nearest_neighbors_sklearn,
+                                    'sk_sym': getattr(nearest_neighbors_sklearn, 'NearestNeighbors'),
+                                    'da_sym': NearestNeighbors_da},
+               'SVC': {'pack': svm_sklearn,
+                       'sk_sym': getattr(svm_sklearn, 'SVC'),
+                       'da_sym': SVC_da},
+               'SVR': {'pack': svm_sklearn,
+                       'sk_sym': getattr(svm_sklearn, 'SVR'),
+                       'da_sym': SVR_da},
+               'NuSVC': {'pack': svm_sklearn,
+                         'sk_sym': getattr(svm_sklearn, 'NuSVC'),
+                         'da_sym': NuSVC_da},
+               'NuSVR': {'pack': svm_sklearn,
+                         'sk_sym': getattr(svm_sklearn, 'NuSVR'),
+                         'da_sym': NuSVR_da},
+               }
+
+def skpatch(*args, print_patched=True):
+    """
+    Replace specified scikit-learn packages by their AOCL-DA equivalent
+    """
+
+    if not args:
+        # No arguments specified, so patch everything possible
+        packages = AMD_SYMBOLS.keys()
+    elif isinstance(args[0], str):
+        packages = [args[0]]
+    elif isinstance(args[0], (list, tuple)):
+        packages = args[0]
+    else:
+        raise TypeError("Unrecognized argument")
+
+    # packages is a list of candidate package names to patch
+
+    successfully_patched = []
+
+    for package in packages:
+
+        try:
+            pack = AMD_SYMBOLS[package]['pack']
+            sym = AMD_SYMBOLS[package]['da_sym']
+            setattr(pack, package, sym)
+            successfully_patched.append(package)
+        except KeyError:
+            print(f"The package {package} was not found.")
+
+    if successfully_patched and print_patched:
+        print(
+            "AOCL Extension for scikit-learn enabled for the following packages:"
+        )
+        print(', '.join(successfully_patched))
+
+
+def undo_skpatch(*args, print_patched=True):
+    """
+    Reinstate scikit-learn packages with their original symbols
+    """
+
+    if not args:
+        packages = AMD_SYMBOLS.keys()
+    elif isinstance(args[0], str):
+        packages = [args[0]]
+    elif isinstance(args[0], (list, tuple)):
+        packages = args[0]
+    else:
+        raise TypeError("Unrecognized argument")
+
+    successfully_unpatched = []
+
+    for package in packages:
+        try:
+            pack = AMD_SYMBOLS[package]['pack']
+            sym = AMD_SYMBOLS[package]['sk_sym']
+            setattr(pack, package, sym)
+            successfully_unpatched.append(package)
+        except KeyError:
+            print(f"The package {package} was not found.")
+
+    if successfully_unpatched and print_patched:
+        print(
+            "AOCL Extension for scikit-learn disabled for the following packages:"
+        )
+        print(', '.join(successfully_unpatched))
