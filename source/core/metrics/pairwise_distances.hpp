@@ -79,6 +79,10 @@ template <typename T>
 da_status minkowski(da_order order, da_int m, da_int n, da_int k, const T *X, da_int ldx,
                     const T *Y, da_int ldy, T *D, da_int ldd, T p);
 
+template <typename T>
+da_status hassanat(da_order order, da_int m, da_int n, da_int k, const T *X, da_int ldx,
+                    const T *Y, da_int ldy, T *D, da_int ldd);
+
 } // namespace pairwise_distances
 } // namespace da_metrics
 } // namespace ARCH
