@@ -36,12 +36,33 @@ namespace da_metrics {
 namespace pairwise {
 
 template <typename T>
+void cosine_kernel(da_int m, da_int n, da_int k, const T *X, da_int ldx,
+                 const T *Y, da_int ldy, T *D, da_int ldd, bool compute_distance, T *X_norms, T *Y_norms) {
+    // Go through the rows of D
+    for (da_int i = 0; i < m; i++) {
+        // Go through the columns of X (also updating the columns of D)
+        for (da_int j = 0; j < n; j++) {
+            D[i * ldd + j] =
+                da_blas::cblas_dot(k, X + i * ldx, 1, Y + j * ldy, 1);
+        }
+
+        if (compute_distance) {
+            for (da_int j = 0; j < n; j++)
+                D[i * ldd + j] = 1.0 - (D[i * ldd + j] / (X_norms[i] * Y_norms[j]));
+        } else {
+            for (da_int j = 0; j < n; j++)
+                D[i * ldd + j] /= (X_norms[i] * Y_norms[j]);
+        }
+    }
+}
+
+template <typename T>
 da_status cosine(da_order order, da_int m, da_int n, da_int k, const T *X, da_int ldx,
                  const T *Y, da_int ldy, T *D, da_int ldd, bool compute_distance) {
     da_status status = da_status_success;
     const T *Y_new = Y;
-    const T eps = std::numeric_limits<T>::epsilon();
-    T normX, normY;
+
+    // T normX, normY;
     // We want to compute the distance of X to itself
     // The sizes are copies so it's safe to update them
     if (Y == nullptr) {
@@ -74,49 +95,73 @@ da_status cosine(da_order order, da_int m, da_int n, da_int k, const T *X, da_in
         ldd_new = n;
     }
 
+    // Allocate norm arrays
+    std::vector<T> X_norms, Y_norms;
+    try {
+        X_norms.resize(m);
+        Y_norms.resize(n);
+    } catch (std::bad_alloc const &) {
+        return da_status_memory_error;
+    }
+
+    // Precalculate the norms, setting any 0s to 1 to avoid division by 0 later
+    // Norm is only 0 for the 0 vector, and any vector dotted with the 0 vector is 0
+    // So this doesn't interfere with accuracy
+    // Should probably do norms[i] <= epsilon for the 0 check instead.
+    for (da_int i = 0; i < m; ++i) {
+        X_norms[i] = da_blas::cblas_nrm2(k, X_new + i * ldx, 1);
+
+        if (X_norms[i] == 0.0) {
+            X_norms[i] = 1.0;
+        }
+    }
+
+    if (Y == nullptr) {
+        for (da_int j = 0; j < n; ++j) {
+            Y_norms[j] = X_norms[j];
+        }
+    } else {
+        for (da_int j = 0; j < n; ++j) {
+            Y_norms[j] = da_blas::cblas_nrm2(k, Y_new + j * ldy, 1);
+
+            if (Y_norms[j] == 0.0) {
+                Y_norms[j] = 1.0;
+            }
+        }
+    }
+
     if (Y != nullptr) {
-        // Go through the rows of D
-        for (da_int i = 0; i < m; i++) {
-            // Go through the columns of X (also updating the columns of D)
-            for (da_int j = 0; j < n; j++) {
-                D_new[i * ldd_new + j] =
-                    da_blas::cblas_dot(k, X_new + i * ldx, 1, Y_new + j * ldy, 1);
-                // Only compute the norms if Dij is nonzero
-                if (std::abs(D_new[i * ldd_new + j]) > eps) {
-                    normX = da_blas::cblas_nrm2(k, X_new + i * ldx, 1);
-                    normY = da_blas::cblas_nrm2(k, Y_new + j * ldy, 1);
-                } else {
-                    normX = 1.0;
-                    normY = 1.0;
-                }
-                D_new[i * ldd_new + j] = D_new[i * ldd_new + j] / (normX * normY);
-                if (compute_distance)
-                    D_new[i * ldd_new + j] = 1.0 - D_new[i * ldd_new + j];
+        // Block sizes
+        da_int i_block_size = std::min(200, m);
+        da_int j_block_size = std::min(200, n);
+        #pragma omp parallel for shared(m, n, k, i_block_size, j_block_size, X_new, ldx, Y_new, ldy, D, ldd, compute_distance, X_norms, Y_norms) collapse(2)
+        for (da_int jj = 0; jj < n; jj+=j_block_size) {
+            for (da_int ii = 0; ii < m; ii+=i_block_size) {
+                int jb = std::min(n-jj, j_block_size);
+                int ib = std::min(m-ii, i_block_size);
+
+                cosine_kernel(ib, jb, k,
+                    X_new + ii*ldx, ldx,
+                    Y_new + jj*ldy, ldy,
+                    D_new + jj + ii*ldd_new, ldd_new,
+                    compute_distance, X_norms.data(), Y_norms.data());
             }
         }
     } else {
-        // Go through the rows of D
-        for (da_int i = 0; i < m; i++) {
-            // Go through the columns of X (also updating the columns of D)
-            // For the case where X==Y, the matrix is symmetric so we only need to iterate through half the columns
-            for (da_int j = i + 1; j < n; j++) {
-                D_new[i * ldd_new + j] =
-                    da_blas::cblas_dot(k, X_new + i * ldx, 1, Y_new + j * ldy, 1);
-                // Only compute the norms if Dij is nonzero
-                if (std::abs(D_new[i * ldd_new + j]) > eps) {
-                    normX = da_blas::cblas_nrm2(k, X_new + i * ldx, 1);
-                    normY = da_blas::cblas_nrm2(k, Y_new + j * ldy, 1);
-                } else {
-                    normX = 1.0;
-                    normY = 1.0;
-                }
-                D_new[i * ldd_new + j] = D_new[i * ldd_new + j] / (normX * normY);
-                if (compute_distance)
-                    D_new[i * ldd_new + j] = 1.0 - D_new[i * ldd_new + j];
-                // Update the corresponding element in the lower triangular part
-                D_new[j * ldd_new + i] = D_new[i * ldd_new + j];
+        // Block sizes
+        da_int block_size = std::min(2048, m);
+        #pragma omp parallel for shared(m, k, block_size, X_new, ldx, D, ldd, compute_distance, X_norms) collapse(2)
+        for (da_int jj = 0; jj < m; jj+=block_size) {
+            for (da_int ii = 0; ii < m; ii+=block_size) {
+                int jb = std::min(n-jj, block_size);
+                int ib = std::min(m-ii, block_size);
+
+                cosine_kernel(ib, jb, k,
+                    X_new + ii*ldx, ldx,
+                    X_new + jj*ldx, ldx,
+                    D_new + jj + ii*ldd_new, ldd_new,
+                    compute_distance, X_norms.data(), X_norms.data());
             }
-            D[i * ldd_new + i] = 0.0;
         }
     }
     if (order == column_major) {
